@@ -1,0 +1,250 @@
+name: Build ImmortalWrt - Orange Pi Zero3 1.5GB
+
+on:
+  workflow_dispatch:
+    inputs:
+      clean_build:
+        description: '清理缓存重新编译'
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches:
+      - main
+      - master
+      - 'bugfix/**'
+      - 'feature/**'
+    paths:
+      - 'package/boot/uboot-sunxi/patches/**'
+      - 'target/linux/sunxi/**'
+      - '.github/workflows/build-orangepi-zero3.yml'
+
+env:
+  TARGET: sunxi
+  SUBTARGET: cortexa53
+  DEVICE_PROFILE: xunlong_orangepi-zero3
+  TZ: Asia/Shanghai
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Orange Pi Zero3 1.5GB Firmware
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360  # 6小时上限
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. 检出代码
+      # -----------------------------------------------------------------------
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # -----------------------------------------------------------------------
+      # 2. 安装编译依赖
+      # -----------------------------------------------------------------------
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -y
+          sudo apt-get full-upgrade -y
+          sudo apt-get install -y \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison \
+            build-essential bzip2 ccache clang cmake cpio curl \
+            device-tree-compiler ecj fastjar flex gawk gettext \
+            gcc-multilib g++-multilib git gnutls-dev gperf haveged \
+            help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
+            libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+            libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp \
+            ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip \
+            python3-ply python3-docutils python3-pyelftools qemu-utils \
+            re2c rsync scons squashfs-tools subversion swig texinfo \
+            uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          sudo timedatectl set-timezone "$TZ"
+
+      # -----------------------------------------------------------------------
+      # 3. 释放磁盘空间（GitHub runner 空间有限）
+      # -----------------------------------------------------------------------
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/.ghcup /usr/share/swift
+          docker image prune -af 2>/dev/null || true
+          df -h
+
+      # -----------------------------------------------------------------------
+      # 4. 缓存 dl/ 目录（下载的源码包）
+      # -----------------------------------------------------------------------
+      - name: Cache downloads
+        uses: actions/cache@v4
+        with:
+          path: dl/
+          key: dl-${{ env.TARGET }}-${{ env.SUBTARGET }}-${{ hashFiles('feeds.conf.default') }}-${{ github.sha }}
+          restore-keys: |
+            dl-${{ env.TARGET }}-${{ env.SUBTARGET }}-${{ hashFiles('feeds.conf.default') }}-
+            dl-${{ env.TARGET }}-${{ env.SUBTARGET }}-
+            dl-${{ env.TARGET }}-
+
+      # -----------------------------------------------------------------------
+      # 5. 缓存工具链（首次编译后显著加速）
+      # -----------------------------------------------------------------------
+      - name: Cache toolchain
+        if: inputs.clean_build != true
+        uses: actions/cache@v4
+        with:
+          path: |
+            staging_dir/toolchain-*
+            staging_dir/host
+            build_dir/host
+            build_dir/hostpkg
+          key: toolchain-${{ env.TARGET }}-${{ env.SUBTARGET }}-${{ hashFiles('toolchain/**', 'include/toolchain*.mk') }}
+          restore-keys: |
+            toolchain-${{ env.TARGET }}-${{ env.SUBTARGET }}-
+
+      # -----------------------------------------------------------------------
+      # 6. 更新并安装 feeds
+      # -----------------------------------------------------------------------
+      - name: Update feeds
+        run: ./scripts/feeds update -a
+
+      - name: Install feeds
+        run: ./scripts/feeds install -a
+
+      # -----------------------------------------------------------------------
+      # 7. 生成编译配置
+      # -----------------------------------------------------------------------
+      - name: Generate .config
+        run: |
+          cat > .config << 'EOF'
+          # 目标平台
+          CONFIG_TARGET_sunxi=y
+          CONFIG_TARGET_sunxi_cortexa53=y
+          CONFIG_TARGET_sunxi_cortexa53_DEVICE_xunlong_orangepi-zero3=y
+
+          # LuCI Web 界面
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-base=y
+          CONFIG_PACKAGE_luci-theme-bootstrap=y
+
+          # 中文语言包
+          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+
+          # 常用工具
+          CONFIG_PACKAGE_wget-ssl=y
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_htop=y
+          CONFIG_PACKAGE_nano=y
+          CONFIG_PACKAGE_bash=y
+          EOF
+          make defconfig
+
+      # -----------------------------------------------------------------------
+      # 8. 下载编译依赖的源码包
+      # -----------------------------------------------------------------------
+      - name: Download package sources
+        run: |
+          make download -j8 V=s
+          # 检查并删除损坏的下载文件（< 1KB）
+          find dl/ -size -1024c -delete 2>/dev/null || true
+
+      # -----------------------------------------------------------------------
+      # 9. 编译固件
+      # -----------------------------------------------------------------------
+      - name: Build firmware
+        id: build
+        run: |
+          echo "::group::Compile (multi-thread)"
+          make -j$(nproc) V=s || {
+            echo "::endgroup::"
+            echo "::group::Retry single-thread for error diagnosis"
+            make -j1 V=s
+            echo "::endgroup::"
+          }
+          echo "::endgroup::"
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      # -----------------------------------------------------------------------
+      # 10. 整理固件文件
+      # -----------------------------------------------------------------------
+      - name: Collect firmware artifacts
+        if: steps.build.outputs.status == 'success'
+        run: |
+          mkdir -p artifact/firmware
+          cp -v bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/*.img.gz \
+             artifact/firmware/ 2>/dev/null || true
+          cp -v bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/*.manifest \
+             artifact/firmware/ 2>/dev/null || true
+          cp -v bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/sha256sums \
+             artifact/firmware/ 2>/dev/null || true
+          echo "===== 固件列表 ====="
+          ls -lh artifact/firmware/
+          echo "===================="
+          # 写入构建信息
+          echo "Build date: $(date -u '+%Y-%m-%d %H:%M UTC')" > artifact/firmware/build-info.txt
+          echo "Commit: ${{ github.sha }}" >> artifact/firmware/build-info.txt
+          echo "Target: ${{ env.TARGET }}/${{ env.SUBTARGET }}" >> artifact/firmware/build-info.txt
+          echo "Device: ${{ env.DEVICE_PROFILE }}" >> artifact/firmware/build-info.txt
+
+      # -----------------------------------------------------------------------
+      # 11. 上传固件为 Actions Artifact（备份，7天）
+      # -----------------------------------------------------------------------
+      - name: Upload firmware artifact
+        if: steps.build.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-${{ env.TARGET }}-${{ env.SUBTARGET }}-${{ env.DEVICE_PROFILE }}-${{ github.run_number }}
+          path: artifact/firmware/
+          retention-days: 7
+
+      # -----------------------------------------------------------------------
+      # 12. 上传 .config（方便复现，7天）
+      # -----------------------------------------------------------------------
+      - name: Upload .config
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-${{ github.run_number }}
+          path: .config
+          retention-days: 7
+
+      # -----------------------------------------------------------------------
+      # 13. 发布 GitHub Release（永久公开下载链接）
+      # -----------------------------------------------------------------------
+      - name: Generate release tag
+        if: steps.build.outputs.status == 'success'
+        id: tag
+        run: |
+          echo "release_tag=orangepi-zero3-$(date -u '+%Y%m%d-%H%M')-r${{ github.run_number }}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        if: steps.build.outputs.status == 'success'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: "Orange Pi Zero3 1.5GB | $(date -u '+%Y-%m-%d %H:%M UTC')"
+          body: |
+            ## ImmortalWrt - Orange Pi Zero3 1.5GB
+
+            **构建信息**
+            - 分支: `${{ github.ref_name }}`
+            - Commit: `${{ github.sha }}`
+            - 构建编号: #${{ github.run_number }}
+            - 构建时间: `$(date -u '+%Y-%m-%d %H:%M UTC')`
+
+            **固件说明**
+            - 目标平台: `sunxi / cortexa53`
+            - 设备型号: Xunlong Orange Pi Zero3
+            - 已包含 1.5GB DRAM 修复补丁
+            - 默认登录地址: http://192.168.1.1（用户名: root，无密码）
+
+            **刷机方法**
+            将 `.img.gz` 解压后用 `dd` 或 balenaEtcher 写入 TF 卡即可。
+          files: artifact/firmware/*
+          fail_on_unmatched_files: false

@@ -1,0 +1,81 @@
+From f9aa935084d24fbbe5e7b2c62948a8f08b228f18 Mon Sep 17 00:00:00 2001
+From: voapilro <voapilro@gmail.com>
+Date: Mon, 6 May 2024 11:36:47 +0200
+Subject: [PATCH] sunxi: H616: fix DRAM size detection for 1.5GB Orange Pi Zero3
+
+The 1.5GB variant of the Orange Pi Zero3 uses the same DRAM controller
+configuration as the 2GB version. The mctl_calc_size() function computes
+the theoretical size as 2GB based on row/col/rank parameters, which is
+incorrect for the 1.5GB SKU.
+
+Fix this by adding mctl_mem_matches_top() which physically verifies the
+last accessible DRAM address by writing/reading a test pattern. If the
+top address is not responding correctly, the actual size is adjusted to
+3/4 of the calculated size (2GB * 3/4 = 1536MB = 1.5GB).
+
+Ported from Armbian patch for u-boot v2025.10.
+Original fix by voapilro <voapilro@gmail.com>.
+
+Signed-off-by: voapilro <voapilro@gmail.com>
+---
+ arch/arm/include/asm/arch-sunxi/dram.h  |  1 +
+ arch/arm/mach-sunxi/dram_dw_helpers.c   |  9 ++++++++-
+ arch/arm/mach-sunxi/dram_helpers.c      | 23 +++++++++++++++++++++++
+ 3 files changed, 32 insertions(+), 1 deletion(-)
+
+--- a/arch/arm/include/asm/arch-sunxi/dram.h
++++ b/arch/arm/include/asm/arch-sunxi/dram.h
+@@ -45,5 +45,6 @@ unsigned long sunxi_dram_init(void);
+ void mctl_await_completion(u32 *reg, u32 mask, u32 val);
+ bool mctl_mem_matches(u32 offset);
+ bool mctl_mem_matches_base(u32 offset, ulong base);
++bool mctl_mem_matches_top(ulong offset);
+ 
+ #endif /* _SUNXI_DRAM_H */
+--- a/arch/arm/mach-sunxi/dram_helpers.c
++++ b/arch/arm/mach-sunxi/dram_helpers.c
+@@ -61,4 +61,27 @@ bool mctl_mem_matches(u32 offset)
+ {
+ 	return mctl_mem_matches_base(offset, CFG_SYS_SDRAM_BASE);
+ }
++
++/*
++ * Test if memory at top of DRAM (at given size offset) is accessible.
++ * Used to detect the 1.5GB variant of boards where the DRAM controller
++ * reports 2GB based on configuration registers, but physical memory
++ * only extends to 1.5GB.
++ */
++bool mctl_mem_matches_top(ulong offset)
++{
++	static const unsigned int value = 0xaa55aa55;
++
++	/* Take last usable memory address */
++	offset -= sizeof(value);
++	dsb();
++	/* Set zero at last usable memory address */
++	writel(0, (ulong)CFG_SYS_SDRAM_BASE + offset);
++	dsb();
++	/* Set other value at last usable memory address */
++	writel(value, (ulong)CFG_SYS_SDRAM_BASE + offset);
++	dsb();
++	/* Check if the same value is actually observed when reading back */
++	return readl((ulong)CFG_SYS_SDRAM_BASE + offset) == value;
++}
+ #endif
+--- a/arch/arm/mach-sunxi/dram_dw_helpers.c
++++ b/arch/arm/mach-sunxi/dram_dw_helpers.c
+@@ -144,7 +144,14 @@ unsigned long mctl_calc_size(const struct dram_config *config)
+ {
+ 	u8 width = config->bus_full_width ? 4 : 2;
++	unsigned long size;
+ 
+ 	/* 8 banks */
+-	return (1ULL << (config->cols + config->rows + 3)) * width * config->ranks;
++	size = (1ULL << (config->cols + config->rows + 3)) * width * config->ranks;
++
++	/* Fix size if last usable memory address is not valid (e.g. 1.5GB variant) */
++	if (!mctl_mem_matches_top(size))
++		size = (size * 3) / 4;
++
++	return size;
+ }
