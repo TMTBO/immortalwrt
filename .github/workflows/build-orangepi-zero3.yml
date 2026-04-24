@@ -221,16 +221,14 @@ jobs:
         if: steps.build.outputs.status == 'success'
         id: tag
         run: |
-          BUILD_DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
           echo "release_tag=orangepi-zero3-$(date -u '+%Y%m%d-%H%M')-r${{ github.run_number }}" >> $GITHUB_OUTPUT
-          echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         if: steps.build.outputs.status == 'success'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
-          name: "Orange Pi Zero3 1.5GB | ${{ steps.tag.outputs.build_date }}"
+          name: "Orange Pi Zero3 1.5GB | $(date -u '+%Y-%m-%d %H:%M UTC')"
           body: |
             ## ImmortalWrt - Orange Pi Zero3 1.5GB
 
@@ -238,7 +236,7 @@ jobs:
             - 分支: `${{ github.ref_name }}`
             - Commit: `${{ github.sha }}`
             - 构建编号: #${{ github.run_number }}
-            - 构建时间: `${{ steps.tag.outputs.build_date }}`
+            - 构建时间: `$(date -u '+%Y-%m-%d %H:%M UTC')`
 
             **固件说明**
             - 目标平台: `sunxi / cortexa53`
