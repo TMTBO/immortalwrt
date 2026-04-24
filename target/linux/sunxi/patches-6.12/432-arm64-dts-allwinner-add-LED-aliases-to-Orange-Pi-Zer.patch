@@ -6,10 +6,14 @@ Subject: [PATCH] arm64: dts: allwinner: add LED aliases to Orange Pi Zero
 
 Add OpenWrt's LED aliases for showing system status.
 
+Green LED (PC13) is used as the power/running indicator (always on when
+the system is running), matching Armbian's LED convention for this board.
+Red LED (PC12) is used for boot, failsafe and upgrade indication.
+
 Signed-off-by: Tianling Shen <cnsztl@gmail.com>
 ---
- .../boot/dts/allwinner/sun50i-h616-orangepi-zero.dtsi     | 8 ++++++--
- 1 file changed, 6 insertions(+), 2 deletions(-)
+ .../boot/dts/allwinner/sun50i-h616-orangepi-zero.dtsi     | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
 
 --- a/arch/arm64/boot/dts/allwinner/sun50i-h616-orangepi-zero.dtsi
 +++ b/arch/arm64/boot/dts/allwinner/sun50i-h616-orangepi-zero.dtsi
@@ -20,12 +24,12 @@ Signed-off-by: Tianling Shen <cnsztl@gmail.com>
 +
 +		led-boot = &power_led;
 +		led-failsafe = &power_led;
-+		led-running = &power_led;
++		led-running = &status_led;
 +		led-upgrade = &power_led;
  	};
  
  	chosen {
-@@ -25,11 +30,10 @@
+@@ -25,15 +30,15 @@
  	leds {
  		compatible = "gpio-leds";
  
@@ -37,4 +41,10 @@ Signed-off-by: Tianling Shen <cnsztl@gmail.com>
 -			default-state = "on";
  		};
  
- 		led-1 {
+-		led-1 {
++		status_led: led-1 {
+ 			function = LED_FUNCTION_STATUS;
+ 			color = <LED_COLOR_ID_GREEN>;
+ 			gpios = <&pio 2 13 GPIO_ACTIVE_HIGH>; /* PC13 */
++			default-state = "on";
+ 		};
